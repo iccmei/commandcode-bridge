@@ -9,19 +9,20 @@ describe("configuration and model aliases", () => {
     expect(config.defaultModel).toBe("deepseek/deepseek-v4-pro");
   });
 
-  it("advertises CommandCode CLI 1.49.0 by default while allowing override", () => {
-    expect(loadBridgeConfig({ env: {} }).cliVersion).toBe("1.49.0");
+  it("advertises CommandCode CLI 1.53.0 by default while allowing override", () => {
+    expect(loadBridgeConfig({ env: {} }).cliVersion).toBe("1.53.0");
     expect(loadBridgeConfig({ env: { COMMANDCODE_CLI_VERSION: "1.14.0-test" } }).cliVersion).toBe(
       "1.14.0-test",
     );
   });
 
-  it("matches the exact CommandCode 1.49.0 canonical catalog and advertised prices", () => {
+  it("matches the exact CommandCode 1.53.0 canonical catalog and advertised prices", () => {
     const expectedPrices = new Map<string, [number, number]>([
       ["deepseek/deepseek-v4-pro", [0.66, 1.98]],
-      ["deepseek/deepseek-v4-flash", [0.22, 0.66]],
+      ["deepseek/deepseek-v4-flash", [0.15, 0.6]],
       ["deepseek/deepseek-v4-flash-vision-exp", [0.22, 0.66]],
       ["deepseek/deepseek-v4-flash-fast", [0.28, 0.56]],
+      ["deepseek/deepseek-v4.1-flash", [0.15, 0.6]],
       ["moonshotai/Kimi-K3", [3, 15]],
       ["moonshotai/Kimi-K2.7-Code", [0.95, 4]],
       ["moonshotai/Kimi-K2.7-Code-Highspeed", [1.9, 8]],
@@ -56,6 +57,7 @@ describe("configuration and model aliases", () => {
       ["thinkingmachines/inkling", [1, 4.05]],
       ["thinkingmachines/inkling-small", [0.5, 1.2]],
       ["poolside/laguna-s-2.1-free", [0, 0]],
+      ["inclusionai/ling-3.0-flash-sante:free", [0, 0]],
       ["claude-sonnet-5", [2, 10]],
       ["claude-sonnet-4-6", [3, 15]],
       ["claude-fable-5-1", [10, 50]],
@@ -89,7 +91,7 @@ describe("configuration and model aliases", () => {
     ]);
     const catalog = loadBridgeConfig({ env: {} }).modelCatalog ?? [];
 
-    expect(catalog).toHaveLength(68);
+    expect(catalog).toHaveLength(70);
     expect(catalog.map((model) => model.id)).toEqual([...expectedPrices.keys()]);
     for (const model of catalog) {
       const match = model.notes?.match(/^\$(\d+(?:\.\d+)?)\/M in · \$(\d+(?:\.\d+)?)\/M out/);
@@ -98,12 +100,13 @@ describe("configuration and model aliases", () => {
     }
   });
 
-  it("matches the exact CommandCode 1.49.0 published context windows", () => {
+  it("matches the exact CommandCode 1.53.0 published context windows", () => {
     const expectedContextWindows = new Map<string, number | undefined>([
       ["deepseek/deepseek-v4-pro", 1_000_000],
       ["deepseek/deepseek-v4-flash", 1_000_000],
       ["deepseek/deepseek-v4-flash-vision-exp", 1_000_000],
       ["deepseek/deepseek-v4-flash-fast", 1_000_000],
+      ["deepseek/deepseek-v4.1-flash", 1_000_000],
       ["moonshotai/Kimi-K3", 1_000_000],
       ["moonshotai/Kimi-K2.7-Code", 256_000],
       ["moonshotai/Kimi-K2.7-Code-Highspeed", 262_000],
@@ -138,6 +141,7 @@ describe("configuration and model aliases", () => {
       ["thinkingmachines/inkling", 256_000],
       ["thinkingmachines/inkling-small", 1_000_000],
       ["poolside/laguna-s-2.1-free", 256_000],
+      ["inclusionai/ling-3.0-flash-sante:free", 262_144],
       ["claude-sonnet-5", 1_000_000],
       ["claude-sonnet-4-6", 1_000_000],
       ["claude-fable-5-1", 1_000_000],
@@ -178,6 +182,61 @@ describe("configuration and model aliases", () => {
     expect(definitions.map((model) => [model.id, model.contextWindow])).toEqual([
       ...expectedContextWindows,
     ]);
+  });
+
+  describe.each([
+    { id: "deepseek/deepseek-v4.1-flash", contextWindow: 1_000_000 },
+    { id: "inclusionai/ling-3.0-flash-sante:free", contextWindow: 262_144 },
+  ])("CLI 1.53.0 model $id", ({ id, contextWindow }) => {
+    it("merges disabled when upgrading a persisted catalog", () => {
+      // Given an established model and the retired Ling in persisted state.
+      const configured = [
+        { id: "deepseek/deepseek-v4-flash", enabled: true },
+        { id: "inclusionai/ling-3.0-flash-free", enabled: true },
+      ];
+
+      // When the catalog gains the new built-ins.
+      const merged = mergeModelCatalog(configured, [], normalizeModelName, false);
+
+      // Then new models require opt-in and retired Ling stays absent.
+      expect(merged.find((model) => model.id === id)).toMatchObject({
+        enabled: false,
+        contextWindow,
+      });
+      expect(merged.some((model) => model.id === "inclusionai/ling-3.0-flash-free")).toBe(false);
+      expect(merged.find((model) => model.id === "deepseek/deepseek-v4-flash")?.enabled).toBe(true);
+    });
+
+    it("resolves its canonical id only after opt-in", () => {
+      // Given the default allowlist does not enable the new model.
+      const defaults = loadBridgeConfig({ env: {}, authPaths: [] });
+      expect(defaults.modelCatalog?.find((model) => model.id === id)?.enabled).toBe(false);
+      expect(() => resolveModel(id, defaults)).toThrow(/not allowed/i);
+
+      // When the new model is explicitly enabled alongside retired Ling.
+      const config = loadBridgeConfig({
+        env: {
+          COMMANDCODE_ALLOWED_MODELS: `${id},inclusionai/ling-3.0-flash-free`,
+        },
+        authPaths: [],
+      });
+
+      // Then it resolves with canonical metadata without reviving old Ling.
+      expect(config.modelCatalog?.find((model) => model.id === id)).toMatchObject({
+        enabled: true,
+        contextWindow,
+      });
+      expect(resolveModel(id, config).upstreamModel).toBe(id);
+      expect(normalizeModelName("inclusionai/ling-3.0-flash-free")).toBe(
+        "inclusionai/ling-3.0-flash-free",
+      );
+      expect(() =>
+        resolveModel("inclusionai/ling-3.0-flash-free", {
+          ...config,
+          allowUnknownModels: true,
+        }),
+      ).toThrow(/not allowed/i);
+    });
   });
 
   it("keeps canonical metadata for built-ins while preserving custom model metadata", () => {
